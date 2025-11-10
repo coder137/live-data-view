@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-
 pub trait DataRead {
     fn read_string(&self) -> String;
 }
