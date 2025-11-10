@@ -3,6 +3,10 @@ name = "live-data-view"
 version = "0.1.0"
 edition = "2024"
 
+[[example]]
+name = "simple"
+path = "examples/simple.rs"
+
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 

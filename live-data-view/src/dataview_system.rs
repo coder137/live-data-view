@@ -1,11 +1,12 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::OnceLock,
+    time::Instant,
 };
 
 use tokio_util::sync::CancellationToken;
 
-use crate::{DataView, DataViewMessage, DataWrite};
+use crate::{DataRead, DataView, DataViewMessage, DataWrite};
 
 static DATAVIEW_SYSTEM_GLOBAL: OnceLock<DataViewSystem> = OnceLock::new();
 
@@ -62,22 +63,29 @@ impl DataViewSystem {
         self.event_rx.resubscribe()
     }
 
-    pub(crate) fn register_read(
-        &self,
-        initial: String,
-        rx: flume::Receiver<DataViewMessage>,
-    ) -> Result<(), ()> {
+    pub fn register_read<T>(&self, inner: T) -> Result<DataView<T>, &'static str>
+    where
+        T: DataRead,
+    {
+        let (tx, rx) = flume::bounded(2);
         self.data_tx
-            .send(DataViewSystemAsyncMessage::NewReadOnly { initial, rx })
-            .map_err(|_e| ())?;
-        Ok(())
+            .send(DataViewSystemAsyncMessage::NewReadOnly {
+                initial: inner.read_string(),
+                rx,
+            })
+            .map_err(|_e| "DataViewSystem failure")?;
+        let view = DataView::new(inner, tx);
+        Ok(view)
     }
 }
 
 impl Drop for DataViewSystem {
     fn drop(&mut self) {
+        let instant = Instant::now();
         self.cancel.cancel();
         self.handle.take().unwrap().join().unwrap();
+        let elapsed = instant.elapsed();
+        println!("DataViewSystem shutdown in {:?}", elapsed);
     }
 }
 
