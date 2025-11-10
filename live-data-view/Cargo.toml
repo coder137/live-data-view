@@ -7,6 +7,10 @@ edition = "2024"
 name = "simple"
 path = "examples/simple.rs"
 
+[[example]]
+name = "simple_global"
+path = "examples/simple_global.rs"
+
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 
