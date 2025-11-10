@@ -1,0 +1,18 @@
+[package]
+name = "live-data-view"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { version = "1", features = ["backtrace"] }
+
+#
+flume = "0.11.1"
+
+#
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "*", features = ["full"] }
+
+#
+serde = { version = "*", features = ["derive"] }
+serde_json = { version = "*" }
