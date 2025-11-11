@@ -22,8 +22,8 @@ pub enum DataViewSystemError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataViewSystemEvent {
-    NewRead { id: DataId, value: String },
-    NewReadWrite { id: DataId, value: String },
+    NewRead { id: DataId, data: String },
+    NewReadWrite { id: DataId, data: String },
     Notify { id: DataId, data: String },
     Drop { id: DataId },
 }
@@ -190,7 +190,7 @@ impl DataViewSystemAsync {
                     self.register_read(id, rx);
                     let event = DataViewSystemEvent::NewRead {
                         id,
-                        value: initial.clone(),
+                        data: initial.clone(),
                     };
                     let data = DataInfo {
                         read: VecDeque::from([initial]),
@@ -205,7 +205,7 @@ impl DataViewSystemAsync {
                     self.register_read(id, rx);
                     let event = DataViewSystemEvent::NewReadWrite {
                         id,
-                        value: initial.clone(),
+                        data: initial.clone(),
                     };
                     let data = DataInfo {
                         read: VecDeque::from([initial]),
@@ -312,12 +312,18 @@ mod tests {
             event,
             DataViewSystemEvent::NewRead {
                 id: 1,
-                value: "3".into()
+                data: "3".into()
             }
         );
 
         let event = event_rx.blocking_recv().unwrap();
-        // assert_eq!(event, "Notify: 1 : 5");
+        assert_eq!(
+            event,
+            DataViewSystemEvent::Notify {
+                id: 1,
+                data: "5".into()
+            }
+        );
     }
 
     #[test]
@@ -341,7 +347,7 @@ mod tests {
             event,
             DataViewSystemEvent::NewReadWrite {
                 id: 1,
-                value: "3".into()
+                data: "3".into()
             }
         );
 
