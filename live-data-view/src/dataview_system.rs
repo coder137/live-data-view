@@ -4,11 +4,21 @@ use std::{
     time::Instant,
 };
 
+use thiserror::Error;
+
 use tokio_util::sync::CancellationToken;
 
 use crate::{DataRead, DataView, DataViewMessage, DataWrite};
 
 static DATAVIEW_SYSTEM_GLOBAL: OnceLock<DataViewSystem> = OnceLock::new();
+
+#[derive(Error, Debug)]
+pub enum DataViewSystemError {
+    #[error("DataViewSystem is already initialized")]
+    AlreadyInitialized,
+    #[error("DataViewSystem is closed")]
+    Closed,
+}
 
 pub struct DataViewSystem {
     data_tx: flume::Sender<DataViewSystemAsyncMessage>,
@@ -47,11 +57,11 @@ impl DataViewSystem {
         }
     }
 
-    pub fn init_global() -> Result<(), &'static str> {
+    pub fn init_global() -> Result<(), DataViewSystemError> {
         let this = Self::init_local();
         DATAVIEW_SYSTEM_GLOBAL
             .set(this)
-            .map_err(|_e| "DataViewSystem already initialized")?;
+            .map_err(|_e| DataViewSystemError::AlreadyInitialized)?;
         Ok(())
     }
 
@@ -63,7 +73,7 @@ impl DataViewSystem {
         self.event_rx.resubscribe()
     }
 
-    pub fn register_read<T>(&self, inner: T) -> Result<DataView<T>, &'static str>
+    pub fn register_read<T>(&self, inner: T) -> Result<DataView<T>, DataViewSystemError>
     where
         T: DataRead,
     {
@@ -73,7 +83,23 @@ impl DataViewSystem {
                 initial: inner.read_string(),
                 rx,
             })
-            .map_err(|_e| "DataViewSystem failure")?;
+            .map_err(|_e| DataViewSystemError::Closed)?;
+        let view = DataView::new(inner, tx);
+        Ok(view)
+    }
+
+    pub fn register_readwrite<T>(&self, inner: T) -> Result<DataView<T>, DataViewSystemError>
+    where
+        T: DataRead + DataWrite + Clone + 'static,
+    {
+        let (tx, rx) = flume::bounded(2);
+        self.data_tx
+            .send(DataViewSystemAsyncMessage::NewReadWrite {
+                initial: inner.read_string(),
+                rx,
+                write: Box::new(inner.clone()),
+            })
+            .map_err(|_e| DataViewSystemError::Closed)?;
         let view = DataView::new(inner, tx);
         Ok(view)
     }
@@ -100,6 +126,10 @@ enum DataViewSystemAsyncMessage {
         write: Box<dyn DataWrite>,
     },
     Notify {
+        id: DataId,
+        data: String,
+    },
+    Update {
         id: DataId,
         data: String,
     },
@@ -150,21 +180,26 @@ impl DataViewSystemAsync {
                 DataViewSystemAsyncMessage::NewReadOnly { initial, rx } => {
                     let id = self.new_dataid();
                     self.register_read(id, rx);
-                    let _ignore = self.event_tx.send(format!("NewReadOnly: {id} {initial}"));
+                    let event = format!("NewReadOnly: {id} {initial}");
                     let data = DataInfo {
                         read: VecDeque::from([initial]),
                         write: None,
                     };
                     self.data.insert(id, data);
+                    println!("{}", event);
+                    let _ignore = self.event_tx.send(event);
                 }
                 DataViewSystemAsyncMessage::NewReadWrite { initial, rx, write } => {
                     let id = self.new_dataid();
                     self.register_read(id, rx);
+                    let event = format!("NewReadWrite: {id} {initial}");
                     let data = DataInfo {
                         read: VecDeque::from([initial]),
                         write: Some(write),
                     };
                     self.data.insert(id, data);
+                    println!("{}", event);
+                    let _ignore = self.event_tx.send(event);
                 }
                 DataViewSystemAsyncMessage::Notify { id, data } => {
                     let info = match self.data.get_mut(&id) {
@@ -173,12 +208,32 @@ impl DataViewSystemAsync {
                             continue;
                         }
                     };
-                    let _ignore = self.event_tx.send(format!("Notify: {id} : {data}"));
+                    let event = format!("Notify: {id} : {data}");
                     info.read.push_front(data);
+                    println!("{}", event);
+                    let _ignore = self.event_tx.send(event);
+                }
+                DataViewSystemAsyncMessage::Update { id, data } => {
+                    let info = match self.data.get_mut(&id) {
+                        Some(info) => info,
+                        None => {
+                            continue;
+                        }
+                    };
+                    let Some(write) = info.write.as_mut() else {
+                        continue;
+                    };
+                    let event = format!("Update: {id} : {data}");
+                    if write.write_string(data) {
+                        println!("{}", event);
+                        let _ignore = self.event_tx.send(event);
+                    }
                 }
                 DataViewSystemAsyncMessage::Drop { id } => {
                     self.data.remove(&id);
-                    let _ignore = self.event_tx.send(format!("Drop: {id}"));
+                    let event = format!("Drop: {id}");
+                    println!("{}", event);
+                    let _ignore = self.event_tx.send(event);
                 }
             }
         }
@@ -211,5 +266,73 @@ impl DataViewSystemAsync {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[test]
+    fn test_read() {
+        let dataview_system = DataViewSystem::init_local();
+        let mut event_rx = dataview_system.get_event_channel();
+
+        let data = Arc::new(Mutex::new(3));
+        let data = dataview_system.register_read(data).unwrap();
+
+        {
+            let mut lock = data.lock().unwrap();
+            *lock += 2;
+            drop(lock);
+        }
+        data.notify();
+
+        let event = event_rx.blocking_recv().unwrap();
+        assert_eq!(event, "NewReadOnly: 1 3");
+
+        let event = event_rx.blocking_recv().unwrap();
+        assert_eq!(event, "Notify: 1 : 5");
+    }
+
+    #[test]
+    fn test_readwrite() {
+        let dataview_system = DataViewSystem::init_local();
+        let mut event_rx = dataview_system.get_event_channel();
+
+        let data = Arc::new(Mutex::new(3));
+        let data = dataview_system.register_readwrite(data).unwrap();
+
+        // Notify (T -> String)
+        {
+            let mut lock = data.lock().unwrap();
+            *lock += 2;
+            drop(lock);
+        }
+        data.notify();
+
+        let event = event_rx.blocking_recv().unwrap();
+        assert_eq!(event, "NewReadWrite: 1 3");
+
+        let event = event_rx.blocking_recv().unwrap();
+        assert_eq!(event, "Notify: 1 : 5");
+
+        // Update (String -> T)
+        dataview_system
+            .data_tx
+            .send(DataViewSystemAsyncMessage::Update {
+                id: 1,
+                data: "20".to_string(),
+            })
+            .unwrap();
+
+        let event = event_rx.blocking_recv().unwrap();
+        assert_eq!(event, "Update: 1 : 20");
+        {
+            let lock = data.lock().unwrap();
+            assert_eq!(*lock, 20);
+        }
     }
 }

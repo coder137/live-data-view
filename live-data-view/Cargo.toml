@@ -12,7 +12,7 @@ name = "simple_global"
 path = "examples/simple_global.rs"
 
 [dependencies]
-anyhow = { version = "1", features = ["backtrace"] }
+thiserror = "2.0.17"
 
 #
 flume = "0.11.1"
