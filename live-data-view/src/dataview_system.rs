@@ -1,14 +1,10 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::OnceLock,
-    time::Instant,
-};
+use std::{sync::OnceLock, time::Instant};
 
 use thiserror::Error;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::{DataRead, DataView, DataViewMessage, DataWrite};
+use crate::{DataRead, DataStorageId, DataStorageMessage, DataStorageSystem, DataView, DataWrite};
 
 static DATAVIEW_SYSTEM_GLOBAL: OnceLock<DataViewSystem> = OnceLock::new();
 
@@ -22,14 +18,14 @@ pub enum DataViewSystemError {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataViewSystemEvent {
-    NewRead { id: DataId, data: String },
-    NewReadWrite { id: DataId, data: String },
-    Notify { id: DataId, data: String },
-    Drop { id: DataId },
+    NewRead { id: DataStorageId, data: String },
+    NewReadWrite { id: DataStorageId, data: String },
+    Notify { id: DataStorageId, data: String },
+    Drop { id: DataStorageId },
 }
 
 pub struct DataViewSystem {
-    data_tx: flume::Sender<DataViewSystemAsyncMessage>,
+    data_tx: flume::Sender<DataStorageMessage>,
     event_rx: tokio::sync::broadcast::Receiver<DataViewSystemEvent>,
     cancel: CancellationToken,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -50,7 +46,7 @@ impl DataViewSystem {
                 .build()
                 .unwrap()
                 .block_on(async move {
-                    let this = DataViewSystemAsync::new(data_tx_clone, data_rx, event_tx);
+                    let this = DataStorageSystem::new(data_tx_clone, data_rx, event_tx);
                     let future = this.run();
                     let future = cancel_clone.run_until_cancelled_owned(future);
                     future.await;
@@ -87,7 +83,7 @@ impl DataViewSystem {
     {
         let (tx, rx) = flume::bounded(2);
         self.data_tx
-            .send(DataViewSystemAsyncMessage::NewRead {
+            .send(DataStorageMessage::NewRead {
                 initial: inner.read_string(),
                 rx,
             })
@@ -102,7 +98,7 @@ impl DataViewSystem {
     {
         let (tx, rx) = flume::bounded(2);
         self.data_tx
-            .send(DataViewSystemAsyncMessage::NewReadWrite {
+            .send(DataStorageMessage::NewReadWrite {
                 initial: inner.read_string(),
                 rx,
                 write: Box::new(inner.clone()),
@@ -120,169 +116,6 @@ impl Drop for DataViewSystem {
         self.handle.take().unwrap().join().unwrap();
         let elapsed = instant.elapsed();
         println!("DataViewSystem shutdown in {:?}", elapsed);
-    }
-}
-
-enum DataViewSystemAsyncMessage {
-    NewRead {
-        initial: String,
-        rx: flume::Receiver<DataViewMessage>,
-    },
-    NewReadWrite {
-        initial: String,
-        rx: flume::Receiver<DataViewMessage>,
-        write: Box<dyn DataWrite>,
-    },
-    Notify {
-        id: DataId,
-        data: String,
-    },
-    Update {
-        id: DataId,
-        data: String,
-    },
-    Drop {
-        id: DataId,
-    },
-}
-
-type DataId = u64;
-
-struct DataInfo {
-    read: VecDeque<String>,
-    write: Option<Box<dyn DataWrite>>,
-}
-
-struct DataViewSystemAsync {
-    data_tx: flume::Sender<DataViewSystemAsyncMessage>,
-    data_rx: flume::Receiver<DataViewSystemAsyncMessage>,
-    event_tx: tokio::sync::broadcast::Sender<DataViewSystemEvent>,
-    // TODO, Make key a UUID in the future (if needed)
-    data: HashMap<DataId, DataInfo>,
-    data_id: DataId,
-}
-
-impl DataViewSystemAsync {
-    fn new(
-        data_tx: flume::Sender<DataViewSystemAsyncMessage>,
-        data_rx: flume::Receiver<DataViewSystemAsyncMessage>,
-        event_tx: tokio::sync::broadcast::Sender<DataViewSystemEvent>,
-    ) -> Self {
-        Self {
-            data_tx,
-            data_rx,
-            event_tx,
-            data: HashMap::new(),
-            data_id: 1,
-        }
-    }
-
-    async fn run(mut self) {
-        loop {
-            let message = self
-                .data_rx
-                .recv_async()
-                .await
-                .expect("DataRx channel should never shutdown");
-            match message {
-                DataViewSystemAsyncMessage::NewRead { initial, rx } => {
-                    let id = self.new_dataid();
-                    self.register_read(id, rx);
-                    let event = DataViewSystemEvent::NewRead {
-                        id,
-                        data: initial.clone(),
-                    };
-                    let data = DataInfo {
-                        read: VecDeque::from([initial]),
-                        write: None,
-                    };
-                    self.data.insert(id, data);
-                    println!("{:?}", event);
-                    let _ignore = self.event_tx.send(event);
-                }
-                DataViewSystemAsyncMessage::NewReadWrite { initial, rx, write } => {
-                    let id = self.new_dataid();
-                    self.register_read(id, rx);
-                    let event = DataViewSystemEvent::NewReadWrite {
-                        id,
-                        data: initial.clone(),
-                    };
-                    let data = DataInfo {
-                        read: VecDeque::from([initial]),
-                        write: Some(write),
-                    };
-                    self.data.insert(id, data);
-                    println!("{:?}", event);
-                    let _ignore = self.event_tx.send(event);
-                }
-                DataViewSystemAsyncMessage::Notify { id, data } => {
-                    let info = match self.data.get_mut(&id) {
-                        Some(info) => info,
-                        None => {
-                            continue;
-                        }
-                    };
-                    let event = DataViewSystemEvent::Notify {
-                        id,
-                        data: data.clone(),
-                    };
-                    info.read.push_front(data);
-                    println!("{:?}", event);
-                    let _ignore = self.event_tx.send(event);
-                }
-                DataViewSystemAsyncMessage::Update { id, data } => {
-                    let info = match self.data.get_mut(&id) {
-                        Some(info) => info,
-                        None => {
-                            continue;
-                        }
-                    };
-                    let Some(write) = info.write.as_mut() else {
-                        continue;
-                    };
-                    if write.write_string(data.clone()) {
-                        let event = DataViewSystemEvent::Notify { id, data };
-                        println!("{:?}", event);
-                        let _ignore = self.event_tx.send(event);
-                    }
-                }
-                DataViewSystemAsyncMessage::Drop { id } => {
-                    self.data.remove(&id);
-                    let event = DataViewSystemEvent::Drop { id };
-                    println!("{:?}", event);
-                    let _ignore = self.event_tx.send(event);
-                }
-            }
-        }
-    }
-
-    fn new_dataid(&mut self) -> DataId {
-        let id = self.data_id;
-        self.data_id += 1;
-        id
-    }
-
-    fn register_read(&self, id: DataId, rx: flume::Receiver<DataViewMessage>) {
-        let tx = self.data_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                let message = rx.recv_async().await;
-                let Ok(message) = message else {
-                    break;
-                };
-                match message {
-                    DataViewMessage::Notify { data } => {
-                        let _ignore = tx
-                            .send_async(DataViewSystemAsyncMessage::Notify { id, data })
-                            .await;
-                    }
-                    DataViewMessage::Drop => {
-                        let _ignore = tx.send_async(DataViewSystemAsyncMessage::Drop { id }).await;
-                        break;
-                    }
-                }
-            }
-        });
     }
 }
 
@@ -363,7 +196,7 @@ mod tests {
         // Update (String -> T)
         dataview_system
             .data_tx
-            .send(DataViewSystemAsyncMessage::Update {
+            .send(DataStorageMessage::Update {
                 id: 1,
                 data: "20".to_string(),
             })
