@@ -12,6 +12,9 @@ pub(crate) enum DataStorageMessage {
         rx: flume::Receiver<DataViewMessage>,
         write: Box<dyn DataWrite>,
     },
+    GetAll {
+        data_tx: tokio::sync::oneshot::Sender<Vec<(u64, bool)>>,
+    },
     Notify {
         id: DataStorageId,
         data: String,
@@ -94,6 +97,14 @@ impl DataStorageSystem {
                     println!("{:?}", event);
                     let _ignore = self.event_tx.send(event);
                 }
+                DataStorageMessage::GetAll { data_tx } => {
+                    let data = self
+                        .data
+                        .iter()
+                        .map(|(id, data)| (*id, data.write.is_some()))
+                        .collect::<Vec<_>>();
+                    let _ignore = data_tx.send(data);
+                }
                 DataStorageMessage::Notify { id, data } => {
                     let info = match self.data.get_mut(&id) {
                         Some(info) => info,
@@ -160,5 +171,22 @@ impl DataStorageSystem {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_storage() {
+        let (data_tx, data_rx) = flume::unbounded();
+        let (event_tx, event_rx) = tokio::sync::broadcast::channel(2);
+        let data_storage_system = DataStorageSystem::new(data_tx, data_rx, event_tx);
+        let data_storage_system_handle = tokio::spawn(async move {
+            data_storage_system.run().await;
+        });
+
+        data_storage_system_handle.abort();
     }
 }

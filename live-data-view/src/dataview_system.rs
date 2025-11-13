@@ -46,9 +46,10 @@ impl DataViewSystem {
                 .build()
                 .unwrap()
                 .block_on(async move {
-                    let this = DataStorageSystem::new(data_tx_clone, data_rx, event_tx);
-                    let future = this.run();
-                    let future = cancel_clone.run_until_cancelled_owned(future);
+                    let data_storage_system =
+                        DataStorageSystem::new(data_tx_clone, data_rx, event_tx);
+                    let data_storage_system_future = data_storage_system.run();
+                    let future = cancel_clone.run_until_cancelled_owned(data_storage_system_future);
                     future.await;
                 });
         });
